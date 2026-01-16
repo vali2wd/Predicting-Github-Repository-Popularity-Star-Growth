@@ -1,68 +1,117 @@
 import polars as pl
 import lightgbm as lgb
 import matplotlib.pyplot as plt
+from sklearn.metrics import root_mean_squared_error
+import joblib
+import os
 
-# 1. Load Pre-Split Data
-# We can just read_parquet now because the files are likely smaller and ready
-print("Loading datasets...")
-train_df = pl.read_parquet('train_dataset.parquet')
-val_df = pl.read_parquet('val_dataset.parquet')
+# Configuration
+TRAIN_PATH = 'train_dataset.parquet'
+VAL_PATH = 'val_dataset.parquet'
+MODEL_PATH = 'lgbm_github_model.pkl'
 
-# 2. Define Features
-TARGET = 'total_stars_scaled'
-IGNORE_COLS = ['repo_name', 'day'] # Keep in file for analysis, drop for training
+# 1. Load Data
+# We always load data because we need it for evaluation/plotting
+print("Loading data...")
+train_df = pl.read_parquet(TRAIN_PATH)
+val_df = pl.read_parquet(VAL_PATH)
 
-# Identify leakage columns to drop (same logic as before)
-# We exclude any column that isn't a lag or rolling stat
+# 2. Create the "Difference" Target
+# We predict (Current_Scaled - Prev_Scaled) to model growth velocity
+TARGET_DIFF = 'target_diff'
+
+train_df = train_df.with_columns(
+    (pl.col('total_stars_scaled') - pl.col('total_stars_lag_1d_scaled')).alias(TARGET_DIFF)
+)
+val_df = val_df.with_columns(
+    (pl.col('total_stars_scaled') - pl.col('total_stars_lag_1d_scaled')).alias(TARGET_DIFF)
+)
+
+# 3. Feature Selection
+IGNORE_COLS = ['repo_name', 'day', TARGET_DIFF]
+
+# Exclude cumulative features that would cause leakage/persistence bias
+cumulative_cols = [
+    'total_stars_scaled', 
+    'total_stars_lag_1d_scaled', 
+    'total_stars_lag_7d_scaled',
+    'total_stars_daily_change_scaled'
+]
+
 all_cols = train_df.columns
-# Columns that contain "lag" or "rolling" are safe features
 feature_cols = [
     c for c in all_cols 
-    if ('lag' in c or 'rolling' in c) 
-    and c not in IGNORE_COLS 
-    and c != TARGET
+    if c not in IGNORE_COLS 
+    and c not in cumulative_cols
 ]
 
-print(f"Training on {len(feature_cols)} features.")
+print(f"Target: {TARGET_DIFF}")
+print(f"Features: {len(feature_cols)}")
 
-# 3. Prepare X and y
-# Convert to pandas for LightGBM (efficient zero-copy often possible)
-X_train = train_df.select(feature_cols).to_pandas()
-y_train = train_df.select(TARGET).to_pandas().values.ravel()
-
+# 4. Prepare X and y for LightGBM
+# We create the datasets for validation even if we don't train, 
+# because we need them to calculate the score of the loaded model.
 X_val = val_df.select(feature_cols).to_pandas()
-y_val = val_df.select(TARGET).to_pandas().values.ravel()
+y_val = val_df.select(TARGET_DIFF).to_pandas().values.ravel()
 
-# Clean up Polars frames to free RAM for LightGBM
-del train_df, val_df
+# 5. Model Logic (Load or Train)
+if os.path.exists(MODEL_PATH):
+    print(f"✅ Found existing model at '{MODEL_PATH}'. Loading...")
+    model = joblib.load(MODEL_PATH)
+    
+    # Optional: Verify the loaded model expects the same number of features
+    if model.n_features_ != len(feature_cols):
+        print(f"⚠️ Warning: Loaded model expects {model.n_features_} features, but we have {len(feature_cols)}.")
+else:
+    print(f"❌ No model found at '{MODEL_PATH}'. Training new model...")
+    
+    # Only convert training data if we actually need to train
+    X_train = train_df.select(feature_cols).to_pandas()
+    y_train = train_df.select(TARGET_DIFF).to_pandas().values.ravel()
+    
+    model = lgb.LGBMRegressor(
+        n_estimators=2000,
+        learning_rate=0.03,
+        num_leaves=31,
+        colsample_bytree=0.7,
+        random_state=42,
+        n_jobs=-1
+    )
 
-# 4. Train
-model = lgb.LGBMRegressor(
-    n_estimators=2000,        # Increased since we have early stopping
-    learning_rate=0.05,
-    num_leaves=31,
-    colsample_bytree=0.8,     # Randomly select 80% of features per tree (prevents overfitting)
-    subsample=0.8,            # Randomly select 80% of data per tree
-    random_state=42,
-    n_jobs=-1
-)
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_train, y_train), (X_val, y_val)],
+        eval_names=['Train', 'Valid'],
+        eval_metric='rmse',
+        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)]
+    )
+    
+    # Save the model
+    print(f"💾 Saving model to '{MODEL_PATH}'...")
+    joblib.dump(model, MODEL_PATH)
 
-callbacks = [
-    lgb.early_stopping(stopping_rounds=100),
-    lgb.log_evaluation(period=100)
-]
+# Clean up memory
+del train_df
 
-print("Starting training...")
-model.fit(
-    X_train, y_train,
-    eval_set=[(X_train, y_train), (X_val, y_val)],
-    eval_names=['Train', 'Valid'],
-    eval_metric='rmse',
-    callbacks=callbacks
-)
+# 6. Evaluation & Reconstruction
+print("\n--- Evaluation ---")
 
-# 5. Visualize
-lgb.plot_importance(model, max_num_features=20, importance_type='gain', figsize=(10,6))
-plt.title("Feature Importance (Gain)")
+# Actual previous values (needed to reverse the math)
+prev_scaled = val_df.select('total_stars_lag_1d_scaled').to_pandas().values.ravel()
+actual_scaled = val_df.select('total_stars_scaled').to_pandas().values.ravel()
+
+# Predict the Diff
+pred_diff = model.predict(X_val)
+
+# Reconstruct: Predicted_Total = Previous + Predicted_Diff
+pred_total_scaled = prev_scaled + pred_diff
+
+# Calculate RMSE on the 'Scaled Total' using the new function
+rmse_scaled = root_mean_squared_error(actual_scaled, pred_total_scaled)
+print(f"RMSE (Scaled Total Space): {rmse_scaled:.5f}")
+
+# 7. Plotting
+lgb.plot_importance(model, max_num_features=15, importance_type='gain', figsize=(10,6))
+plt.title("Feature Importance (Growth Velocity Model)")
 plt.tight_layout()
 plt.show()
