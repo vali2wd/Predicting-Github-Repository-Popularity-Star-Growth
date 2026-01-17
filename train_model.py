@@ -31,11 +31,11 @@ print(f"Date range: {min_date} to {max_date}")
 
 # Calculate split date (80% point) using string manipulation
 from datetime import datetime, timedelta
-min_dt = datetime.strptime(min_date, '%Y-%m-%d')
-max_dt = datetime.strptime(max_date, '%Y-%m-%d')
+min_dt = min_date
+max_dt = max_date
 date_range = (max_dt - min_dt).days
 split_dt = min_dt + timedelta(days=int(date_range * 0.8))
-split_date = split_dt.strftime('%Y-%m-%d')
+split_date = split_dt
 
 print(f"Split date (80%): {split_date}")
 

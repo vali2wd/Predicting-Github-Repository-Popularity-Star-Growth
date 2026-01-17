@@ -13,7 +13,7 @@ MODEL_PATH = 'lgbm_github_log_only.pkl'
 
 # Choose a repo with enough history (e.g., 'facebook/react', 'pandas-dev/pandas')
 # or set to None for random selection
-BENCHMARK_REPO = 'Alamofire/Alamofire'  # Set to None for random
+BENCHMARK_REPO = 'torvalds/linux'  # Set to None for random
 HORIZON_DAYS = 90  # How far into the future to test
 
 def load_resources():
