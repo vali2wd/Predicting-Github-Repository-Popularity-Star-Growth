@@ -116,13 +116,14 @@ print(f"Validation samples: {len(y_val):,}")
 print(f"\n=== Training LightGBM ({FORECAST_HORIZON}-Day Forecast Model) ===")
 model = lgb.LGBMRegressor(
     n_estimators=2000,
-    learning_rate=0.05,
+    learning_rate=0.01,
     num_leaves=31,
     colsample_bytree=0.7,
     subsample=0.8,
     random_state=42,
     n_jobs=-1,
-    verbose=-1
+    verbose=-1,
+    # reg_lambda=1.0
 )
 
 model.fit(
