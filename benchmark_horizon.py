@@ -105,26 +105,45 @@ def run_benchmark():
             pct_err = (err / actual_log1p[d]) * 100 if actual_log1p[d] != 0 else 0
             print(f"Day {d:2d}: Drift = {err:+.5f} ({pct_err:+.2f}%)")
 
-    # 5. Plot
+    # 5. Convert to Original Scale for Presentation
+    actual_stars = np.expm1(actual_log1p)
+    pred_stars = np.expm1(recursive_preds)
+    
+    # 6. Plot (Two Subplots)
     dates = df_future['day'].to_list()
     
-    plt.figure(figsize=(14, 6))
-    plt.plot(dates, actual_log1p, label='Actual History', color='black', linewidth=2)
-    plt.plot(dates, recursive_preds, label='Recursive Forecast', color='red', linestyle='--', linewidth=2)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
     
-    plt.title(f"Forecast Horizon Stability: {repo_name} ({len(df_future)} Days)")
-    plt.ylabel("Total Stars (log1p)")
-    plt.xlabel("Date")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    # Top Plot: Log1p Space (Technical)
+    ax1.plot(dates, actual_log1p, label='Actual History', color='black', linewidth=2)
+    ax1.plot(dates, recursive_preds, label='Recursive Forecast', color='red', linestyle='--', linewidth=2)
+    ax1.fill_between(dates, actual_log1p, recursive_preds, 
+                     color='red', alpha=0.15)
+    ax1.axhline(y=actual_log1p[0], color='gray', linestyle=':', alpha=0.5, label='Baseline (Day 0)')
+    ax1.set_title(f"Forecast Horizon Stability: {repo_name} ({len(df_future)} Days) - Log1p Space")
+    ax1.set_ylabel("Total Stars (log1p)")
+    ax1.set_xlabel("Date")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
     
-    # Add error fill
-    plt.fill_between(dates, actual_log1p, recursive_preds, 
-                     color='red', alpha=0.15, label='Accumulated Error')
+    # Bottom Plot: Original Scale (Presentation)
+    ax2.plot(dates, actual_stars, label='Actual History', color='black', linewidth=2)
+    ax2.plot(dates, pred_stars, label='Recursive Forecast', color='red', linestyle='--', linewidth=2)
+    ax2.fill_between(dates, actual_stars, pred_stars, 
+                     color='red', alpha=0.15)
+    ax2.axhline(y=actual_stars[0], color='gray', linestyle=':', alpha=0.5, label='Baseline (Day 0)')
+    ax2.set_title(f"Forecast Horizon Stability - Original Scale (Star Counts)")
+    ax2.set_ylabel("Total Stars")
+    ax2.set_xlabel("Date")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
     
-    # Add benchmark line
+    # Format y-axis with commas for readability
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'))
+    
+    # Calculate drift on original scale
     final_drift_pct = abs((recursive_preds[-1] - actual_log1p[-1]) / actual_log1p[-1]) * 100
-    plt.axhline(y=actual_log1p[0], color='gray', linestyle=':', alpha=0.5, label='Baseline (Day 0)')
+    final_star_diff = abs(pred_stars[-1] - actual_stars[-1])
     
     plt.tight_layout()
     plt.savefig('horizon_benchmark.png', dpi=150, bbox_inches='tight')
@@ -135,7 +154,10 @@ def run_benchmark():
     print(f"\n=== Summary ===")
     print(f"Repository: {repo_name}")
     print(f"Forecast Length: {len(df_future)} days")
-    print(f"Final Drift: {final_drift_pct:.2f}%")
+    print(f"Actual Final Stars: {int(actual_stars[-1]):,}")
+    print(f"Predicted Final Stars: {int(pred_stars[-1]):,}")
+    print(f"Star Difference: {int(final_star_diff):,} stars")
+    print(f"Final Drift (log1p): {final_drift_pct:.2f}%")
     if final_drift_pct < 5:
         print("✅ PASS: Drift < 5% (Model is stable)")
     elif final_drift_pct < 10:

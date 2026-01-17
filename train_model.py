@@ -72,8 +72,10 @@ val_df = val_df.with_columns(
 BANNED = {
     'repo_name',                      # Identifier
     'day',                            # Identifier
+    'total_stars',                    # Raw cumulative stars (LEAKAGE!)
     'total_stars_log1p',              # Current target (direct leakage)
     'total_stars_lag_1d_log1p',       # Previous value (causes persistence bias)
+    'total_stars_lag_7d_log1p',       # Older lag (still persistence)
     'total_stars_daily_change_log1p', # Direct derivative of target
     TARGET                            # The target itself
 }
