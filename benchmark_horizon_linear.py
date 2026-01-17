@@ -8,12 +8,12 @@ import os
 from sklearn.metrics import mean_absolute_error
 
 # --- Config ---
-VAL_PATH = 'val_dataset.parquet'
-MODEL_PATH = 'lgbm_github_log_only.pkl'
+VAL_PATH = 'val_dataset_linear.parquet'
+MODEL_PATH = 'lgbm_github_linear.pkl'
 
 # Choose a repo with enough history (e.g., 'facebook/react', 'pandas-dev/pandas')
 # or set to None for random selection
-BENCHMARK_REPO = 'torvalds/linux'  # Set to None for random
+BENCHMARK_REPO = None  # Set to None for random
 HORIZON_DAYS = 90  # How far into the future to test
 
 def load_resources():
@@ -54,8 +54,6 @@ def prepare_features(df, model):
         print(f"\n❌ ERROR: {len(missing_features)} features are missing from validation data!")
         print(f"First 10 missing: {missing_features[:10]}")
         print(f"\nAvailable columns sample: {available_features[:10]}")
-        print(f"\nThis means val_dataset.parquet was created from the old dataset.")
-        print(f"Solution: Re-run train_model.py to regenerate train/val splits from github_features_log1pd.parquet")
         raise ValueError(f"Missing features in validation dataset: {len(missing_features)} features")
     
     X = df.select(required_features).to_pandas()
@@ -81,98 +79,75 @@ def run_benchmark():
     df_future = df.head(min(HORIZON_DAYS, len(df)))
     
     # 2. CRITICAL: Identify which features are "future-dependent"
-    # These would NOT be available in a true forecasting scenario
     feature_names = model.feature_name_
     
-    # Features we CAN use (based on historical data only):
-    # - Lags (lag_7d, lag_1d) - but these get updated as we forecast
-    # - Rolling stats (rolling_mean_7d, etc.) - also updated
-    # Features we CANNOT use in true forecasting:
-    # - Current values (total_commits, total_forks) - unknown in future
-    # - Daily changes (daily_change) - unknown in future
-    
     future_dependent = [f for f in feature_names if 
-                       ('_log1p' in f and 'lag' not in f and 'rolling' not in f and 'total_' in f) or
-                       'daily_change' in f]
+                       ('daily_change' in f or 
+                        (f.startswith('total_') and 'lag' not in f and 'rolling' not in f))]
     
     print(f"\n⚠️ WARNING: {len(future_dependent)} features require future data:")
     print(f"Examples: {future_dependent[:5]}")
     print(f"\nThis benchmark tests 'given future activity, predict stars'")
     print(f"NOT 'predict stars without knowing future activity'")
-    print(f"\nFor TRUE forecasting, you would need to either:")
-    print(f"  1. Remove these features and rely only on star history/lags")
-    print(f"  2. Build separate models to forecast activity features first")
-    print(f"  3. Use time series models (ARIMA, Prophet, etc.) instead")
     
     # 3. Proceed with current (optimistic) test
     print(f"\nProceeding with optimistic test (using future activity data)...")
     X = prepare_features(df_future, model)
     predicted_velocities = model.predict(X)
     
-    # 3. Recursive Forecast in Log1p Space
-    # Start with the actual log1p value on Day 0
-    actual_log1p = df_future['total_stars_log1p'].to_numpy()
+    # 3. Recursive Forecast in Linear Space
+    # Determine which columns exist
+    if 'total_stars' in df_future.columns:
+        actual_stars = df_future['total_stars'].to_numpy()
+    elif 'total_stars_scaled' in df_future.columns:
+        actual_stars = df_future['total_stars_scaled'].to_numpy()
+    else:
+        raise ValueError("No total_stars column found in dataset")
     
     # Initialize recursive predictions
-    recursive_preds = np.zeros(len(actual_log1p))
-    recursive_preds[0] = actual_log1p[0]  # Day 0 is ground truth
+    recursive_preds = np.zeros(len(actual_stars))
+    recursive_preds[0] = actual_stars[0]  # Day 0 is ground truth
     
     # From Day 1 onwards: Pred_t = Pred_{t-1} + Velocity_t
-    for t in range(1, len(actual_log1p)):
+    for t in range(1, len(actual_stars)):
         recursive_preds[t] = recursive_preds[t-1] + predicted_velocities[t]
         
     # 4. Measure Errors at Key Intervals
     days = [7, 30, 60, 90]
-    print("\n--- Horizon Accuracy (Drift in Log1p Space) ---")
+    print("\n--- Horizon Accuracy (Linear Space) ---")
     for d in days:
         if d < len(recursive_preds):
-            err = recursive_preds[d] - actual_log1p[d]
-            pct_err = (err / actual_log1p[d]) * 100 if actual_log1p[d] != 0 else 0
-            print(f"Day {d:2d}: Drift = {err:+.5f} ({pct_err:+.2f}%)")
+            err = recursive_preds[d] - actual_stars[d]
+            pct_err = (err / actual_stars[d]) * 100 if actual_stars[d] != 0 else 0
+            print(f"Day {d:2d}: Drift = {err:+.2f} stars ({pct_err:+.2f}%)")
 
-    # 5. Convert to Original Scale for Presentation
-    actual_stars = np.expm1(actual_log1p)
-    pred_stars = np.expm1(recursive_preds)
-    
-    # 6. Plot (Two Subplots)
+    # 5. Plot (Single Scale)
     dates = df_future['day'].to_list()
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    fig, ax = plt.subplots(figsize=(14, 6))
     
-    # Top Plot: Log1p Space (Technical)
-    ax1.plot(dates, actual_log1p, label='Actual History', color='black', linewidth=2)
-    ax1.plot(dates, recursive_preds, label='Recursive Forecast', color='red', linestyle='--', linewidth=2)
-    ax1.fill_between(dates, actual_log1p, recursive_preds, 
+    # Plot: Original Scale
+    ax.plot(dates, actual_stars, label='Actual History', color='black', linewidth=2)
+    ax.plot(dates, recursive_preds, label='Recursive Forecast', color='red', linestyle='--', linewidth=2)
+    ax.fill_between(dates, actual_stars, recursive_preds, 
                      color='red', alpha=0.15)
-    ax1.axhline(y=actual_log1p[0], color='gray', linestyle=':', alpha=0.5, label='Baseline (Day 0)')
-    ax1.set_title(f"Forecast Horizon Stability: {repo_name} ({len(df_future)} Days) - Log1p Space")
-    ax1.set_ylabel("Total Stars (log1p)")
-    ax1.set_xlabel("Date")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Bottom Plot: Original Scale (Presentation)
-    ax2.plot(dates, actual_stars, label='Actual History', color='black', linewidth=2)
-    ax2.plot(dates, pred_stars, label='Recursive Forecast', color='red', linestyle='--', linewidth=2)
-    ax2.fill_between(dates, actual_stars, pred_stars, 
-                     color='red', alpha=0.15)
-    ax2.axhline(y=actual_stars[0], color='gray', linestyle=':', alpha=0.5, label='Baseline (Day 0)')
-    ax2.set_title(f"Forecast Horizon Stability - Original Scale (Star Counts)")
-    ax2.set_ylabel("Total Stars")
-    ax2.set_xlabel("Date")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    ax.axhline(y=actual_stars[0], color='gray', linestyle=':', alpha=0.5, label='Baseline (Day 0)')
+    ax.set_title(f"Forecast Horizon Stability: {repo_name} ({len(df_future)} Days) - Linear Scale")
+    ax.set_ylabel("Total Stars")
+    ax.set_xlabel("Date")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     
     # Format y-axis with commas for readability
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'))
     
-    # Calculate drift on original scale
-    final_drift_pct = abs((recursive_preds[-1] - actual_log1p[-1]) / actual_log1p[-1]) * 100
-    final_star_diff = abs(pred_stars[-1] - actual_stars[-1])
+    # Calculate drift
+    final_drift_pct = abs((recursive_preds[-1] - actual_stars[-1]) / actual_stars[-1]) * 100
+    final_star_diff = abs(recursive_preds[-1] - actual_stars[-1])
     
     plt.tight_layout()
-    plt.savefig('horizon_benchmark.png', dpi=150, bbox_inches='tight')
-    print(f"\n📊 Plot saved to 'horizon_benchmark.png'")
+    plt.savefig('horizon_benchmark_linear.png', dpi=150, bbox_inches='tight')
+    print(f"\n📊 Plot saved to 'horizon_benchmark_linear.png'")
     plt.show()
     
     # Summary
@@ -181,16 +156,15 @@ def run_benchmark():
     print(f"Repository: {repo_name}")
     print(f"Forecast Length: {len(df_future)} days")
     print(f"Actual Final Stars: {int(actual_stars[-1]):,}")
-    print(f"Predicted Final Stars: {int(pred_stars[-1]):,}")
+    print(f"Predicted Final Stars: {int(recursive_preds[-1]):,}")
     print(f"Star Difference: {int(final_star_diff):,} stars")
-    print(f"Final Drift (log1p): {final_drift_pct:.2f}%")
+    print(f"Final Drift: {final_drift_pct:.2f}%")
     if final_drift_pct < 5:
         print("✅ PASS: Drift < 5% (Model is stable)")
     elif final_drift_pct < 10:
         print("⚠️ MARGINAL: Drift 5-10% (Acceptable for long horizons)")
     else:
         print("❌ FAIL: Drift > 10% (Model has bias accumulation)")
-    print(f"\n💡 For TRUE forecasting without future data, see comment at top of file")
 
 
 if __name__ == "__main__":
